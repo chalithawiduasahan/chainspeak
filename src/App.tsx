@@ -9,7 +9,7 @@ import InsightsSection from './components/Insights/InsightsSection';
 import VaultExchangeSection from './components/VaultExchange/VaultExchangeSection';
 import SettingsSection from './components/Settings/SettingsSection';
 import LandingPage from './components/Landing/LandingPage';
-import AuthModal from './components/Auth/AuthModal';
+import UsernameModal from './components/Auth/UsernameModal';
 import { authService } from './services/authService';
 import { notificationService } from './services/notificationService';
 import { useSessionTimer } from './hooks/useSessionTimer';
@@ -34,7 +34,7 @@ function App() {
   };
 
   // Track user activity globally when authenticated
-  useSessionTimer(userProfile?.auth_user_id);
+  useSessionTimer(userProfile?.id);
 
   // Check for existing authentication on app load
   useEffect(() => {
@@ -57,39 +57,6 @@ function App() {
     };
 
     checkAuth();
-
-    // Listen for auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log('Auth state changed:', event, session?.user?.id);
-      
-      if (event === 'SIGNED_IN' && session?.user) {
-        // User signed in, get their profile
-        const profile = await authService.getCurrentUser();
-        if (profile) {
-          setUserProfile(profile);
-          setIsAuthenticated(true);
-          setShowAuthModal(false);
-          triggerDataRefresh();
-          
-          // Create welcome notification for new users
-          try {
-            await notificationService.createWelcomeNotification(profile.id, profile.nickname);
-          } catch (notificationError) {
-            console.warn('Failed to create welcome notification:', notificationError);
-          }
-        }
-      } else if (event === 'SIGNED_OUT') {
-        // User signed out
-        setUserProfile(null);
-        setIsAuthenticated(false);
-        setActiveTab('home');
-        setDataRefreshKey(0);
-      }
-    });
-
-    return () => {
-      subscription.unsubscribe();
-    };
   }, []);
 
   // Debug log current userProfile state on every render
@@ -99,13 +66,29 @@ function App() {
     setShowAuthModal(true);
   };
 
-  const handleAuthSuccess = (user: any) => {
+  const handleAuthSuccess = async (user: any) => {
     console.log('App.tsx: Auth success, user:', user);
     setUserProfile(user);
     setIsAuthenticated(true);
     setShowAuthModal(false);
     setActiveTab('home');
     triggerDataRefresh();
+    
+    // Create welcome notification for new users (check if user was just created)
+    try {
+      // Check if this is a new user by checking created_at timestamp
+      const userCreatedAt = new Date(user.created_at);
+      const now = new Date();
+      const timeDiff = now.getTime() - userCreatedAt.getTime();
+      const minutesDiff = timeDiff / (1000 * 60);
+      
+      // If user was created in the last 5 minutes, consider them new
+      if (minutesDiff < 5) {
+        await notificationService.createWelcomeNotification(user.id, user.nickname);
+      }
+    } catch (notificationError) {
+      console.warn('Failed to create welcome notification:', notificationError);
+    }
   };
 
   const handleAuthModalClose = () => {
@@ -272,9 +255,9 @@ function App() {
           />
         </Routes>
 
-        {/* Auth Modal */}
+        {/* Username Modal */}
         {showAuthModal && (
-          <AuthModal
+          <UsernameModal
             isOpen={showAuthModal}
             onClose={handleAuthModalClose}
             onSuccess={handleAuthSuccess}

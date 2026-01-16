@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Mail, Lock, User, Eye, EyeOff, Chrome, CheckCircle, Edit } from 'lucide-react';
+import { X, Mail, Lock, User, Eye, EyeOff, CheckCircle, Edit } from 'lucide-react';
 import { authService } from '../../services/authService';
 
 interface AuthModalProps {
@@ -90,17 +90,10 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess, darkM
     }
   };
 
-  const handleGoogleAuth = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      await authService.signInWithGoogle();
-      // The redirect will handle the success case
-    } catch (error: any) {
-      setError(error.message || 'Google authentication failed');
-      setLoading(false);
-    }
-  };
+  // OAuth removed - using username-only authentication
+  // const handleGoogleAuth = async () => {
+  //   // OAuth functionality removed
+  // };
 
   const handleResendVerification = async () => {
     try {
@@ -266,36 +259,7 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess, darkM
           {/* Content */}
           <form onSubmit={handleSubmit} className="p-4 md:p-6">
             <div className="space-y-3 md:space-y-4">
-              {/* Google Sign In Button */}
-              <button
-                type="button"
-                onClick={handleGoogleAuth}
-                disabled={loading}
-                className={`w-full flex items-center justify-center space-x-3 px-4 py-3 border rounded-xl transition-all duration-300 hover:scale-105 disabled:opacity-50 ${
-                  darkMode 
-                    ? 'border-gray-600 hover:bg-gray-700 text-gray-300' 
-                    : 'border-gray-300 hover:bg-gray-50 text-gray-700'
-                }`}
-              >
-                <Chrome className="w-5 h-5" />
-                <span>Continue with Google</span>
-              </button>
-
-              {/* Divider */}
-              <div className="relative">
-                <div className={`absolute inset-0 flex items-center ${
-                  darkMode ? 'text-gray-600' : 'text-gray-400'
-                }`}>
-                  <div className="w-full border-t border-gray-300 dark:border-gray-600"></div>
-                </div>
-                <div className="relative flex justify-center text-sm">
-                  <span className={`px-2 ${
-                    darkMode ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-500'
-                  }`}>
-                    Or continue with email
-                  </span>
-                </div>
-              </div>
+              {/* OAuth removed - using username-only authentication */}
 
               {/* Email */}
               <div>

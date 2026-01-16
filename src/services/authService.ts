@@ -2,225 +2,140 @@ import { supabase } from '../lib/supabase';
 
 export interface UserProfile {
   id: string;
-  auth_user_id: string;
-  email: string;
+  auth_user_id?: string | null;
+  email?: string | null;
   nickname: string;
-  full_name?: string;
-  avatar_url?: string;
+  full_name?: string | null;
+  avatar_url?: string | null;
   profile_completed: boolean;
   created_at: string;
 }
 
-export interface SignUpData {
-  email: string;
-  password: string;
-  nickname: string;
-}
-
-export interface SignUpResult {
-  user?: UserProfile;
-  needsVerification?: boolean;
-  message?: string;
-}
-
-export interface SignInData {
-  email: string;
-  password: string;
-}
-
 export class AuthService {
-  async signUp(data: SignUpData): Promise<SignUpResult> {
+  /**
+   * Sign in or sign up with username
+   * If username exists, returns that user
+   * If username doesn't exist, creates a new user and returns it
+   */
+  async signInWithUsername(username: string): Promise<UserProfile> {
     try {
-      console.log('AuthService: Starting sign up process for:', data.email);
+      console.log('AuthService: Starting username auth for:', username);
 
-      // Sign up with Supabase Auth
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: data.email,
-        password: data.password,
-        options: {
-          data: {
-            nickname: data.nickname,
+      // Validate username
+      if (!username || username.trim().length < 3 || username.trim().length > 20) {
+        throw new Error('Username must be between 3 and 20 characters');
+      }
+
+      // Check if username matches pattern (letters, numbers, underscores, hyphens)
+      const usernamePattern = /^[a-zA-Z0-9_-]+$/;
+      if (!usernamePattern.test(username.trim())) {
+        throw new Error('Username can only contain letters, numbers, underscores, and hyphens');
+      }
+
+      const trimmedUsername = username.trim().toLowerCase();
+
+      // Check if user exists
+      const { data: existingUser, error: checkError } = await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('nickname', trimmedUsername)
+        .maybeSingle();
+
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.error('Error checking username:', checkError);
+        throw new Error('Failed to check username availability');
+      }
+
+      if (existingUser) {
+        console.log('AuthService: User found, logging in:', existingUser.id);
+        // Store user ID in localStorage for session management
+        localStorage.setItem('chainspeak_user_id', existingUser.id);
+        localStorage.setItem('chainspeak_username', existingUser.nickname);
+        return existingUser;
+      }
+
+      // User doesn't exist, create new user
+      console.log('AuthService: User not found, creating new user');
+      const { data: newUser, error: createError } = await supabase
+        .from('user_profiles')
+        .insert([
+          {
+            nickname: trimmedUsername,
+            profile_completed: false,
+            created_at: new Date().toISOString()
+          }
+        ])
+        .select()
+        .single();
+
+      if (createError) {
+        console.error('Error creating user:', createError);
+        
+        // Check if it's a unique constraint violation (username already exists)
+        if (createError.code === '23505' || createError.message.includes('unique')) {
+          // Try to get the existing user
+          const { data: user } = await supabase
+            .from('user_profiles')
+            .select('*')
+            .eq('nickname', trimmedUsername)
+            .single();
+          
+          if (user) {
+            localStorage.setItem('chainspeak_user_id', user.id);
+            localStorage.setItem('chainspeak_username', user.nickname);
+            return user;
           }
         }
-      });
-
-      if (authError) {
-        console.error('Auth sign up error:', authError);
         
-        // Check if it's an email confirmation required error
-        if (authError.message.includes('email') || authError.message.includes('confirmation')) {
-          return {
-            needsVerification: true,
-            message: 'Please check your email for verification link'
-          };
-        }
-        
-        throw new Error(authError.message);
+        throw new Error('Failed to create user account');
       }
 
-      // Check if user needs email confirmation
-      if (authData.user && !authData.session) {
-        console.log('AuthService: User created but needs email verification');
-        return {
-          needsVerification: true,
-          message: 'Please check your email for verification link'
-        };
+      if (!newUser) {
+        throw new Error('User creation failed - no data returned');
       }
 
-      if (!authData.user) {
-        return {
-          needsVerification: true,
-          message: 'Account created. Please check your email for verification link'
-        };
-      }
-
-      console.log('AuthService: Auth user created:', authData.user.id);
-
-      // If we have a session, the user is immediately signed in
-      if (authData.session) {
-        // Wait a moment for the trigger to create the profile
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Get the created profile
-        const profile = await this.getCurrentUser();
-        if (profile) {
-          console.log('AuthService: User profile created:', profile);
-          return { user: profile };
-        }
-      }
-
-      // Default to needing verification
-      return {
-        needsVerification: true,
-        message: 'Please check your email for verification link'
-      };
+      console.log('AuthService: New user created:', newUser.id);
+      localStorage.setItem('chainspeak_user_id', newUser.id);
+      localStorage.setItem('chainspeak_username', newUser.nickname);
+      return newUser;
     } catch (error) {
-      console.error('Sign up error:', error);
+      console.error('Sign in with username error:', error);
       throw error;
     }
   }
 
-  async signIn(data: SignInData): Promise<UserProfile> {
-    try {
-      console.log('AuthService: Starting sign in process for:', data.email);
-
-      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-        email: data.email,
-        password: data.password,
-      });
-
-      if (authError) {
-        console.error('Auth sign in error:', authError);
-        throw new Error(authError.message);
-      }
-
-      if (!authData.user) {
-        throw new Error('No user data returned from sign in');
-      }
-
-      console.log('AuthService: User signed in:', authData.user.id);
-
-      // Get the user profile
-      const profile = await this.getCurrentUser();
-      if (!profile) {
-        throw new Error('User profile not found');
-      }
-
-      console.log('AuthService: User profile retrieved:', profile);
-      return profile;
-    } catch (error) {
-      console.error('Sign in error:', error);
-      throw error;
-    }
-  }
-
-  async signInWithGoogle(): Promise<void> {
-    try {
-      console.log('AuthService: Starting Google sign in');
-
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: `${window.location.origin}`,
-        }
-      });
-
-      if (error) {
-        console.error('Google sign in error:', error);
-        throw new Error(error.message);
-      }
-
-      // The redirect will handle the rest
-    } catch (error) {
-      console.error('Google sign in error:', error);
-      throw error;
-    }
-  }
-
-  async resendVerification(email: string): Promise<void> {
-    try {
-      console.log('AuthService: Resending verification email to:', email);
-
-      const { error } = await supabase.auth.resend({
-        type: 'signup',
-        email: email
-      });
-
-      if (error) {
-        console.error('Resend verification error:', error);
-        throw new Error(error.message);
-      }
-
-      console.log('AuthService: Verification email resent successfully');
-    } catch (error) {
-      console.error('Resend verification error:', error);
-      throw error;
-    }
-  }
-
+  /**
+   * Get current user from localStorage
+   */
   async getCurrentUser(): Promise<UserProfile | null> {
     try {
-      // Get current auth user
-      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      const userId = localStorage.getItem('chainspeak_user_id');
+      const username = localStorage.getItem('chainspeak_username');
 
-      if (authError) {
-        console.log('Get auth user error:', authError);
-        // If it's just a session missing error, return null gracefully
-        if (authError.message.includes('session missing') || authError.message.includes('Auth session missing')) {
-          console.log('AuthService: No active session found');
-          return null;
-        }
-        // For other auth errors, still return null but log the error
-        console.error('AuthService: Auth error, but continuing:', authError.message);
+      if (!userId || !username) {
+        console.log('AuthService: No user in localStorage');
         return null;
       }
 
-      if (!user) {
-        console.log('AuthService: No authenticated user');
-        return null;
-      }
-
-      console.log('AuthService: Found authenticated user:', user.id);
-
-      // Get user profile
+      // Fetch user from database to get latest data
       const { data: profile, error: profileError } = await supabase
         .from('user_profiles')
         .select('*')
-        .eq('auth_user_id', user.id)
+        .eq('id', userId)
         .single();
 
       if (profileError) {
         console.error('Get user profile error:', profileError);
-        // If profile doesn't exist, return null gracefully
-        if (profileError.code === 'PGRST116') {
-          console.log('AuthService: User profile not found for authenticated user');
-          return null;
-        }
+        // Clear invalid localStorage data
+        localStorage.removeItem('chainspeak_user_id');
+        localStorage.removeItem('chainspeak_username');
         return null;
       }
 
       if (!profile) {
-        console.log('AuthService: No user profile found');
+        console.log('AuthService: User profile not found');
+        localStorage.removeItem('chainspeak_user_id');
+        localStorage.removeItem('chainspeak_username');
         return null;
       }
 
@@ -228,7 +143,6 @@ export class AuthService {
       return profile;
     } catch (error) {
       console.error('Get current user error:', error);
-      // Always return null instead of throwing, so the app doesn't crash
       return null;
     }
   }
@@ -237,16 +151,9 @@ export class AuthService {
     try {
       console.log('AuthService: Signing out user');
 
-      const { error } = await supabase.auth.signOut();
-
-      if (error) {
-        console.error('Sign out error:', error);
-        throw new Error(error.message);
-      }
-
-      // Clear any local storage
+      // Clear localStorage
       localStorage.removeItem('chainspeak_user_id');
-      localStorage.removeItem('chainspeak_user');
+      localStorage.removeItem('chainspeak_username');
 
       console.log('AuthService: User signed out successfully');
     } catch (error) {
@@ -269,7 +176,7 @@ export class AuthService {
       const { data: profile, error } = await supabase
         .from('user_profiles')
         .update(updates)
-        .eq('auth_user_id', currentUser.auth_user_id)
+        .eq('id', currentUser.id)
         .select()
         .single();
 
@@ -279,6 +186,12 @@ export class AuthService {
       }
 
       console.log('AuthService: Profile updated:', profile);
+      
+      // Update localStorage if nickname changed
+      if (updates.nickname && profile) {
+        localStorage.setItem('chainspeak_username', profile.nickname);
+      }
+      
       return profile;
     } catch (error) {
       console.error('Update profile error:', error);
@@ -294,12 +207,6 @@ export class AuthService {
       console.error('Check authentication error:', error);
       return false;
     }
-  }
-
-  // Legacy method for backward compatibility
-  async createUserProfile(nickname: string): Promise<UserProfile> {
-    // This method is now deprecated in favor of the new auth system
-    throw new Error('Please use the new sign up system instead');
   }
 }
 

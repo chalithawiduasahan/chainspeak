@@ -7,7 +7,7 @@ const corsHeaders = {
 }
 
 interface ChatMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'model'
   content: string
 }
 
@@ -35,10 +35,10 @@ serve(async (req) => {
       )
     }
 
-    // Get Claude API key from environment
-    const claudeApiKey = Deno.env.get('CLAUDE_API_KEY')
-    if (!claudeApiKey) {
-      console.error('CLAUDE_API_KEY not found in environment')
+    // Get Gemini API key from environment
+    const geminiApiKey = Deno.env.get('GEMINI_API_KEY')
+    if (!geminiApiKey) {
+      console.error('GEMINI_API_KEY not found in environment')
       return new Response(
         JSON.stringify({ error: 'AI service not configured' }),
         { 
@@ -48,31 +48,47 @@ serve(async (req) => {
       )
     }
 
-    // Prepare messages for Claude API
-    const messages: ChatMessage[] = [
-      ...history,
-      { role: 'user', content: message }
-    ]
+    // Convert history to Gemini format
+    // Gemini uses 'model' instead of 'assistant' for AI responses
+    const geminiHistory = history.map(msg => ({
+      role: msg.role === 'assistant' ? 'model' : msg.role,
+      parts: [{ text: msg.content }]
+    }))
 
-    // Call Claude API
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    // Prepare the request for Gemini API
+    const requestBody: any = {
+      contents: [
+        ...geminiHistory,
+        {
+          role: 'user',
+          parts: [{ text: message }]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 1024,
+      },
+      systemInstruction: {
+        parts: [{ text: "You are Chainspeak Assistant, an AI assistant integrated into ChainSpeak, a privacy-focused platform where users can have anonymous conversations. Be helpful, thoughtful, and respect the user's privacy. Keep responses conversational and engaging while being informative. Help users understand ChainSpeak features, privacy, blockchain technology, and how to earn from their conversations." }]
+      }
+    }
+
+    // Call Gemini API
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`
+    
+    const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': claudeApiKey,
-        'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify({
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 1000,
-        messages: messages,
-        system: "You are Claude, an AI assistant integrated into ChainSpeak, a privacy-focused platform where users can have anonymous conversations. Be helpful, thoughtful, and respect the user's privacy. Keep responses conversational and engaging while being informative."
-      })
+      body: JSON.stringify(requestBody)
     })
 
     if (!response.ok) {
       const errorText = await response.text()
-      console.error('Claude API error:', response.status, errorText)
+      console.error('Gemini API error:', response.status, errorText)
       
       // Return a fallback response instead of exposing the error
       return new Response(
@@ -89,10 +105,14 @@ serve(async (req) => {
 
     const data = await response.json()
     
+    // Extract the response text from Gemini's response format
+    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || 
+                   "I apologize, but I couldn't generate a response. Please try again."
+    
     return new Response(
       JSON.stringify({ 
-        content: data.content[0].text,
-        usage: data.usage 
+        content: content,
+        usage: data.usageMetadata || {}
       }),
       { 
         status: 200, 

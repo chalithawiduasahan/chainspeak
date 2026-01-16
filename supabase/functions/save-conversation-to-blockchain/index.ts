@@ -42,10 +42,52 @@ async function encryptConversationData(data, encryptionKey) {
 async function uploadToPinata(encryptedData, filename) {
   const pinataApiKey = Deno.env.get('PINATA_API_KEY');
   const pinataSecretApiKey = Deno.env.get('PINATA_SECRET_API_KEY');
-  if (!pinataApiKey || !pinataSecretApiKey) {
-    throw new Error('Pinata API credentials missing. Please set PINATA_API_KEY and PINATA_SECRET_API_KEY environment variables.');
+  const pinataJWT = Deno.env.get('PINATA_JWT');
+  
+  // Prefer JWT if available (more modern and secure)
+  if (pinataJWT) {
+    console.log('📤 Uploading to Pinata IPFS using JWT...');
+    try {
+      const formData = new FormData();
+      const blob = new Blob([encryptedData], { type: 'application/json' });
+      formData.append('file', blob, filename);
+      const metadata = JSON.stringify({
+        name: filename,
+        keyvalues: {
+          platform: 'chainspeak',
+          type: 'conversation_session',
+          encrypted: 'true'
+        }
+      });
+      formData.append('pinataMetadata', metadata);
+      const options = JSON.stringify({ cidVersion: 1 });
+      formData.append('pinataOptions', options);
+      const response = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${pinataJWT}`
+        },
+        body: formData
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Pinata upload error:', response.status, errorText);
+        throw new Error(`Pinata upload failed: ${response.status} - ${errorText}`);
+      }
+      const result = await response.json();
+      console.log('✅ Successfully uploaded to Pinata IPFS:', result.IpfsHash);
+      return result.IpfsHash;
+    } catch (error) {
+      console.error('Pinata upload error:', error);
+      throw new Error(`Failed to upload to Pinata: ${error.message}`);
+    }
   }
-  console.log('📤 Uploading to Pinata IPFS...');
+  
+  // Fallback to API key method
+  if (!pinataApiKey || !pinataSecretApiKey) {
+    throw new Error('Pinata API credentials missing. Please set PINATA_JWT or PINATA_API_KEY and PINATA_SECRET_API_KEY environment variables.');
+  }
+  console.log('📤 Uploading to Pinata IPFS using API keys...');
   try {
     const formData = new FormData();
     const blob = new Blob([encryptedData], { type: 'application/json' });
@@ -84,7 +126,8 @@ async function uploadToPinata(encryptedData, filename) {
 }
 
 async function storeOnAlgorand(cid, username, sessionId) {
-  const rpcUrl = Deno.env.get('ALGORAND_RPC_URL') || 'https://testnet-api.4160.nodely.dev';
+  // Use Algorand Testnet (free tier)
+  const rpcUrl = Deno.env.get('ALGORAND_RPC_URL') || 'https://testnet-api.algonode.cloud';
   const mnemonic = Deno.env.get('ALGORAND_MNEMONIC');
   if (!mnemonic || mnemonic === 'your_25_word_mnemonic_here' || mnemonic.split(' ').length !== 25) {
     throw new Error('Algorand mnemonic not configured properly. Expected 25 words.');
@@ -93,7 +136,8 @@ async function storeOnAlgorand(cid, username, sessionId) {
     const url = new URL(rpcUrl);
     const baseServer = `${url.protocol}//${url.hostname}`;
     const port = url.port || (url.protocol === 'https:' ? '443' : '80');
-    const apiKey = Deno.env.get('ALGORAND_API_KEY');
+    // For testnet, API key is usually empty or optional
+    const apiKey = Deno.env.get('ALGORAND_API_KEY') || '';
     const algodClient = new algosdk.Algodv2(apiKey, baseServer, port);
     const account = algosdk.mnemonicToSecretKey(mnemonic);
     const suggestedParams = await algodClient.getTransactionParams().do();
@@ -120,7 +164,7 @@ async function storeOnAlgorand(cid, username, sessionId) {
     const signedTxn = txn.signTxn(account.sk);
     const { txId } = await algodClient.sendRawTransaction(signedTxn).do();
     await algosdk.waitForConfirmation(algodClient, txId, 10);
-    console.log('✅ Successfully stored on Algorand blockchain:', txId);
+    console.log('✅ Successfully stored on Algorand testnet:', txId);
     return txId;
   } catch (error) {
     console.error('Algorand storage error:', error);
