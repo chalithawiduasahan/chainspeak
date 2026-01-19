@@ -39,11 +39,20 @@ async function encryptConversationData(data, encryptionKey) {
   }
 }
 
-async function uploadToPinata(encryptedData, filename) {
-  const pinataApiKey = Deno.env.get('PINATA_API_KEY');
-  const pinataSecretApiKey = Deno.env.get('PINATA_SECRET_API_KEY');
-  const pinataJWT = Deno.env.get('PINATA_JWT');
-  
+async function uploadToPinata(encryptedData, filename, supabase) {
+  const { data: pinataSecrets, error: keyError } = await supabase
+    .from('secrets')
+    .select('name, value')
+    .in('name', ['PINATA_API_KEY', 'PINATA_SECRET_API_KEY', 'PINATA_JWT']);
+
+  if (keyError) {
+    throw new Error('Could not fetch Pinata secrets from Supabase');
+  }
+
+  const pinataApiKey = pinataSecrets.find(s => s.name === 'PINATA_API_KEY')?.value;
+  const pinataSecretApiKey = pinataSecrets.find(s => s.name === 'PINATA_SECRET_API_KEY')?.value;
+  const pinataJWT = pinataSecrets.find(s => s.name === 'PINATA_JWT')?.value;
+
   // Prefer JWT if available (more modern and secure)
   if (pinataJWT) {
     console.log('📤 Uploading to Pinata IPFS using JWT...');
@@ -125,10 +134,20 @@ async function uploadToPinata(encryptedData, filename) {
   }
 }
 
-async function storeOnAlgorand(cid, username, sessionId) {
+async function storeOnAlgorand(cid, username, sessionId, supabase) {
+  const { data: algorandMnemonic, error: keyError } = await supabase
+    .from('secrets')
+    .select('value')
+    .eq('name', 'ALGORAND_MNEMONIC')
+    .single();
+
+  if (keyError || !algorandMnemonic) {
+    throw new Error('Algorand mnemonic not configured properly in Supabase secrets.');
+  }
+
   // Use Algorand Testnet (free tier)
   const rpcUrl = Deno.env.get('ALGORAND_RPC_URL') || 'https://testnet-api.algonode.cloud';
-  const mnemonic = Deno.env.get('ALGORAND_MNEMONIC');
+  const mnemonic = algorandMnemonic.value;
   if (!mnemonic || mnemonic === 'your_25_word_mnemonic_here' || mnemonic.split(' ').length !== 25) {
     throw new Error('Algorand mnemonic not configured properly. Expected 25 words.');
   }
@@ -177,6 +196,15 @@ serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
   try {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    
+    if (!supabaseUrl || !supabaseServiceKey) {
+      throw new Error('Supabase configuration missing');
+    }
+    
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
     // --- CHANGED: Also get encryption_key from request body ---
     const { sessionId, username, conversationExchanges, encryption_key } = await req.json();
     if (!sessionId || !username || !conversationExchanges || conversationExchanges.length === 0) {
@@ -205,15 +233,12 @@ serve(async (req) => {
     console.log('✅ Conversation data encrypted successfully');
     console.log('📤 Uploading to Pinata IPFS...');
     const filename = `chainspeak-session-${sessionId}-${Date.now()}.json`;
-    const cid = await uploadToPinata(encryptedData, filename);
+    const cid = await uploadToPinata(encryptedData, filename, supabase);
     console.log('✅ Successfully uploaded to Pinata IPFS:', cid);
     console.log('⛓️ Storing CID on Algorand blockchain...');
-    const txId = await storeOnAlgorand(cid, username, sessionId);
+    const txId = await storeOnAlgorand(cid, username, sessionId, supabase);
     console.log('✅ Successfully stored on Algorand blockchain:', txId);
     console.log('💾 Updating Supabase records...');
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
     // --- CHANGED: Save encryption_key in chat_logs table ---
     const { error: dbError } = await supabase.from('chat_logs').update({
       cid: cid,

@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -35,10 +36,22 @@ serve(async (req) => {
       )
     }
 
-    // Get Gemini API key from environment
-    const geminiApiKey = Deno.env.get('GEMINI_API_KEY')
-    if (!geminiApiKey) {
-      console.error('GEMINI_API_KEY not found in environment')
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    
+    if (!supabaseUrl || !supabaseServiceKey) {
+      throw new Error('Supabase configuration missing');
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const { data: geminiApiKey, error: keyError } = await supabase
+      .from('secrets')
+      .select('value')
+      .eq('name', 'GEMINI_API_KEY')
+      .single();
+
+    if (keyError || !geminiApiKey) {
+      console.error('GEMINI_API_KEY not found in Supabase secrets')
       return new Response(
         JSON.stringify({ error: 'AI service not configured' }),
         { 
@@ -76,7 +89,7 @@ serve(async (req) => {
     }
 
     // Call Gemini API
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey.value}`
     
     const response = await fetch(apiUrl, {
       method: 'POST',

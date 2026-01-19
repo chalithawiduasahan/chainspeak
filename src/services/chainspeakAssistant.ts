@@ -24,7 +24,7 @@ export class ChainspeakAssistant {
       })
 
       // Call the Gemini edge function
-      const { data, error } = await supabase.functions.invoke('chat-with-claude', {
+      const { data, error } = await supabase.functions.invoke('chat-with-gemini', {
         body: {
           message: userMessage,
           history: this.conversationHistory.slice(0, -1) // Send all but the current message
