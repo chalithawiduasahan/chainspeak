@@ -1,81 +1,79 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-}
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-goog-api-key',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+};
 
 interface ChatMessage {
-  role: 'user' | 'assistant' | 'model'
-  content: string
+  role: 'user' | 'assistant' | 'model';
+  content: string;
 }
 
 interface ChatRequest {
-  message: string
-  history?: ChatMessage[]
+  message: string;
+  history?: ChatMessage[];
 }
 
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    return new Response('ok', { headers: corsHeaders });
   }
+  if (req.method === 'GET') {
+    return new Response(JSON.stringify({ ok: true, fn: 'chat-with-gemini' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }    
+
+  const isDebug = Deno.env.get('DEBUG') === 'true';
 
   try {
-    const { message, history = [] }: ChatRequest = await req.json()
+    const { message, history = [] }: ChatRequest = await req.json();
 
     if (!message) {
       return new Response(
         JSON.stringify({ error: 'Message is required' }),
-        { 
-          status: 400, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         }
-      )
+      );
     }
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    // 1. Get Gemini API key from environment secrets
+    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    if (!geminiApiKey) {
+      console.error('GEMINI_API_KEY not found in environment variables');
+      const errorBody = isDebug
+        ? { error: true, stage: 'config', details: 'GEMINI_API_KEY not found in environment secrets.' }
+        : { content: "I'm having trouble connecting to my AI service right now. The service is not configured correctly." };
+      const status = isDebug ? 500 : 200;
+      return new Response(JSON.stringify(errorBody), {
+        status,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // 2. Convert history to Gemini format (role: 'user' or 'model')
+    const geminiHistory = history.map((msg) => ({
+      // Force valid Gemini roles only
+      role: msg.role === 'user' ? 'user' : 'model',
+      parts: [{ text: msg.content }],
+    }));
     
-    if (!supabaseUrl || !supabaseServiceKey) {
-      throw new Error('Supabase configuration missing');
-    }
 
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-    const { data: geminiApiKey, error: keyError } = await supabase
-      .from('secrets')
-      .select('value')
-      .eq('name', 'GEMINI_API_KEY')
-      .single();
-
-    if (keyError || !geminiApiKey) {
-      console.error('GEMINI_API_KEY not found in Supabase secrets')
-      return new Response(
-        JSON.stringify({ error: 'AI service not configured' }),
-        { 
-          status: 500, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      )
-    }
-
-    // Convert history to Gemini format
-    // Gemini uses 'model' instead of 'assistant' for AI responses
-    const geminiHistory = history.map(msg => ({
-      role: msg.role === 'assistant' ? 'model' : msg.role,
-      parts: [{ text: msg.content }]
-    }))
-
-    // Prepare the request for Gemini API
-    const requestBody: any = {
+    // 3. Prepare the request for Gemini API
+    const requestBody = {
       contents: [
         ...geminiHistory,
         {
           role: 'user',
-          parts: [{ text: message }]
-        }
+          parts: [{ text: message }],
+        },
       ],
       generationConfig: {
         temperature: 0.7,
@@ -84,67 +82,66 @@ serve(async (req) => {
         maxOutputTokens: 1024,
       },
       systemInstruction: {
-        parts: [{ text: "You are Chainspeak Assistant, an AI assistant integrated into ChainSpeak, a privacy-focused platform where users can have anonymous conversations. Be helpful, thoughtful, and respect the user's privacy. Keep responses conversational and engaging while being informative. Help users understand ChainSpeak features, privacy, blockchain technology, and how to earn from their conversations." }]
-      }
-    }
-
-    // Call Gemini API
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey.value}`
-    
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+        parts: [{ text: "You are Chainspeak Assistant, an AI assistant integrated into ChainSpeak, a privacy-focused platform where users can have anonymous conversations. Be helpful, thoughtful, and respect the user's privacy. Keep responses conversational and engaging while being informative. Help users understand ChainSpeak features, privacy, blockchain technology, and how to earn from their conversations." }],
       },
-      body: JSON.stringify(requestBody)
-    })
+    };
+
+    // 4. Call Gemini API
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent`;
+
+const response = await fetch(apiUrl, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'x-goog-api-key': geminiApiKey,
+  },
+  body: JSON.stringify(requestBody),
+});
 
     if (!response.ok) {
-      const errorText = await response.text()
-      console.error('Gemini API error:', response.status, errorText)
+      const errorText = await response.text();
+      console.error('Gemini API error:', response.status, errorText);
+
+      const errorBody = isDebug
+        ? { error: true, stage: 'gemini_api', status: response.status, details: errorText }
+        : { content: "I'm having trouble connecting to my AI service right now. Please try again in a moment." };
+      const status = isDebug ? 500 : 200;
       
-      // Return a fallback response instead of exposing the error
-      return new Response(
-        JSON.stringify({ 
-          content: "I'm having trouble connecting to my AI service right now. Please try again in a moment. In the meantime, I'm here to help with any questions you might have about privacy, technology, or general topics.",
-          error: false
-        }),
-        { 
-          status: 200, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      )
+      return new Response(JSON.stringify(errorBody), {
+        status,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    const data = await response.json()
-    
-    // Extract the response text from Gemini's response format
-    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || 
-                   "I apologize, but I couldn't generate a response. Please try again."
-    
+    const data = await response.json();
+    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || "I apologize, but I couldn't generate a response. Please try again.";
+
     return new Response(
-      JSON.stringify({ 
+      JSON.stringify({
         content: content,
-        usage: data.usageMetadata || {}
+        usage: data.usageMetadata || {},
       }),
-      { 
-        status: 200, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       }
-    )
+    );
 
   } catch (error) {
-    console.error('Edge function error:', error)
+    console.error('Edge function error:', error);
     
-    return new Response(
-      JSON.stringify({ 
-        content: "I apologize, but I'm experiencing some technical difficulties. Please try sending your message again. I'm here to help with any questions or have a thoughtful conversation with you.",
-        error: false
-      }),
-      { 
-        status: 200, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
-    )
+    const errorBody = isDebug
+      ? { error: true, stage: 'handler_exception', details: error.message }
+      : { content: "I apologize, but I'm experiencing some technical difficulties. Please try sending your message again." };
+
+      const status = isDebug ? 500 : 200;
+
+      return new Response(
+        JSON.stringify(errorBody),
+        {
+          status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );      
   }
-})
+});

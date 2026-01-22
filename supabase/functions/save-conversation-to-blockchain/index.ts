@@ -1,3 +1,4 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import algosdk from 'https://esm.sh/algosdk@2.7.0';
@@ -5,10 +6,10 @@ import algosdk from 'https://esm.sh/algosdk@2.7.0';
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS'
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
 };
 
-// --- CHANGED: Accept encryptionKey as argument ---
+// --- Encryption: Stays the same ---
 async function encryptConversationData(data, encryptionKey) {
   encryptionKey = encryptionKey || 'default-32-character-key-for-dev';
   try {
@@ -27,11 +28,9 @@ async function encryptConversationData(data, encryptionKey) {
       keyMaterial,
       encodedData
     );
-    // Combine IV and encrypted data
     const combined = new Uint8Array(iv.length + encrypted.byteLength);
     combined.set(iv);
     combined.set(new Uint8Array(encrypted), iv.length);
-    // Convert to base64
     return btoa(String.fromCharCode(...combined));
   } catch (error) {
     console.error('Encryption error:', error);
@@ -39,241 +38,207 @@ async function encryptConversationData(data, encryptionKey) {
   }
 }
 
-async function uploadToPinata(encryptedData, filename, supabase) {
-  const { data: pinataSecrets, error: keyError } = await supabase
-    .from('secrets')
-    .select('name, value')
-    .in('name', ['PINATA_API_KEY', 'PINATA_SECRET_API_KEY', 'PINATA_JWT']);
+// --- Pinata Upload: Reads keys from env ---
+async function uploadToPinata(encryptedData, filename) {
+  console.log('📤 Initializing Pinata upload...');
+  const pinataJWT = Deno.env.get('PINATA_JWT');
 
-  if (keyError) {
-    throw new Error('Could not fetch Pinata secrets from Supabase');
-  }
-
-  const pinataApiKey = pinataSecrets.find(s => s.name === 'PINATA_API_KEY')?.value;
-  const pinataSecretApiKey = pinataSecrets.find(s => s.name === 'PINATA_SECRET_API_KEY')?.value;
-  const pinataJWT = pinataSecrets.find(s => s.name === 'PINATA_JWT')?.value;
-
-  // Prefer JWT if available (more modern and secure)
+  let headers;
   if (pinataJWT) {
-    console.log('📤 Uploading to Pinata IPFS using JWT...');
-    try {
-      const formData = new FormData();
-      const blob = new Blob([encryptedData], { type: 'application/json' });
-      formData.append('file', blob, filename);
-      const metadata = JSON.stringify({
-        name: filename,
-        keyvalues: {
-          platform: 'chainspeak',
-          type: 'conversation_session',
-          encrypted: 'true'
-        }
-      });
-      formData.append('pinataMetadata', metadata);
-      const options = JSON.stringify({ cidVersion: 1 });
-      formData.append('pinataOptions', options);
-      const response = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${pinataJWT}`
-        },
-        body: formData
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Pinata upload error:', response.status, errorText);
-        throw new Error(`Pinata upload failed: ${response.status} - ${errorText}`);
-      }
-      const result = await response.json();
-      console.log('✅ Successfully uploaded to Pinata IPFS:', result.IpfsHash);
-      return result.IpfsHash;
-    } catch (error) {
-      console.error('Pinata upload error:', error);
-      throw new Error(`Failed to upload to Pinata: ${error.message}`);
+    console.log('Using Pinata JWT for authentication.');
+    headers = { 'Authorization': `Bearer ${pinataJWT}` };
+  } else {
+    const pinataApiKey = Deno.env.get('PINATA_API_KEY');
+    const pinataSecretApiKey = Deno.env.get('PINATA_SECRET_API_KEY');
+    if (!pinataApiKey || !pinataSecretApiKey) {
+      throw new Error('Pinata credentials not found. Set PINATA_JWT or both PINATA_API_KEY and PINATA_SECRET_API_KEY.');
     }
-  }
-  
-  // Fallback to API key method
-  if (!pinataApiKey || !pinataSecretApiKey) {
-    throw new Error('Pinata API credentials missing. Please set PINATA_JWT or PINATA_API_KEY and PINATA_SECRET_API_KEY environment variables.');
-  }
-  console.log('📤 Uploading to Pinata IPFS using API keys...');
-  try {
-    const formData = new FormData();
-    const blob = new Blob([encryptedData], { type: 'application/json' });
-    formData.append('file', blob, filename);
-    const metadata = JSON.stringify({
-      name: filename,
-      keyvalues: {
-        platform: 'chainspeak',
-        type: 'conversation_session',
-        encrypted: 'true'
-      }
-    });
-    formData.append('pinataMetadata', metadata);
-    const options = JSON.stringify({ cidVersion: 1 });
-    formData.append('pinataOptions', options);
-    const response = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
-      method: 'POST',
-      headers: {
-        'pinata_api_key': pinataApiKey,
-        'pinata_secret_api_key': pinataSecretApiKey
-      },
-      body: formData
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Pinata upload error:', response.status, errorText);
-      throw new Error(`Pinata upload failed: ${response.status} - ${errorText}`);
-    }
-    const result = await response.json();
-    console.log('✅ Successfully uploaded to Pinata IPFS:', result.IpfsHash);
-    return result.IpfsHash;
-  } catch (error) {
-    console.error('Pinata upload error:', error);
-    throw new Error(`Failed to upload to Pinata: ${error.message}`);
-  }
-}
-
-async function storeOnAlgorand(cid, username, sessionId, supabase) {
-  const { data: algorandMnemonic, error: keyError } = await supabase
-    .from('secrets')
-    .select('value')
-    .eq('name', 'ALGORAND_MNEMONIC')
-    .single();
-
-  if (keyError || !algorandMnemonic) {
-    throw new Error('Algorand mnemonic not configured properly in Supabase secrets.');
-  }
-
-  // Use Algorand Testnet (free tier)
-  const rpcUrl = Deno.env.get('ALGORAND_RPC_URL') || 'https://testnet-api.algonode.cloud';
-  const mnemonic = algorandMnemonic.value;
-  if (!mnemonic || mnemonic === 'your_25_word_mnemonic_here' || mnemonic.split(' ').length !== 25) {
-    throw new Error('Algorand mnemonic not configured properly. Expected 25 words.');
-  }
-  try {
-    const url = new URL(rpcUrl);
-    const baseServer = `${url.protocol}//${url.hostname}`;
-    const port = url.port || (url.protocol === 'https:' ? '443' : '80');
-    // For testnet, API key is usually empty or optional
-    const apiKey = Deno.env.get('ALGORAND_API_KEY') || '';
-    const algodClient = new algosdk.Algodv2(apiKey, baseServer, port);
-    const account = algosdk.mnemonicToSecretKey(mnemonic);
-    const suggestedParams = await algodClient.getTransactionParams().do();
-    const noteData = {
-      type: 'chainspeak_chat_session',
-      cid: cid,
-      username: username,
-      sessionId: sessionId,
-      timestamp: new Date().toISOString(),
-      version: '2.0',
-      platform: 'chainspeak'
+    console.log('Using Pinata API Keys for authentication.');
+    headers = {
+      'pinata_api_key': pinataApiKey,
+      'pinata_secret_api_key': pinataSecretApiKey,
     };
-    const note = new TextEncoder().encode(JSON.stringify(noteData));
-    if (note.length > 1024) {
-      throw new Error('Note data too large for Algorand transaction');
-    }
-    const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-      from: account.addr,
-      to: account.addr,
-      amount: 0,
-      note: note,
-      suggestedParams: suggestedParams
-    });
-    const signedTxn = txn.signTxn(account.sk);
-    const { txId } = await algodClient.sendRawTransaction(signedTxn).do();
-    await algosdk.waitForConfirmation(algodClient, txId, 10);
-    console.log('✅ Successfully stored on Algorand testnet:', txId);
-    return txId;
-  } catch (error) {
-    console.error('Algorand storage error:', error);
-    throw new Error(`Failed to store on Algorand: ${error.message}`);
   }
+
+  const formData = new FormData();
+  const blob = new Blob([encryptedData], { type: 'application/json' });
+  formData.append('file', blob, filename);
+  const metadata = JSON.stringify({
+    name: filename,
+    keyvalues: { platform: 'chainspeak', type: 'conversation_session', encrypted: 'true' },
+  });
+  formData.append('pinataMetadata', metadata);
+  formData.append('pinataOptions', JSON.stringify({ cidVersion: 1 }));
+
+  const response = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Pinata upload failed: ${response.status} - ${errorText}`);
+  }
+
+  const result = await response.json();
+  console.log('✅ Successfully uploaded to Pinata IPFS:', result.IpfsHash);
+  return result.IpfsHash;
 }
 
+// --- Algorand Storage: Uses Base64 secret key ---
+async function storeOnAlgorand(cid, username, sessionId) {
+  console.log('⛓️ Initializing Algorand transaction...');
+  const rpcUrl = Deno.env.get('ALGORAND_RPC_URL') || 'https://testnet-api.algonode.cloud';
+  const skB64 = Deno.env.get('ALGORAND_SECRET_KEY_BASE64');
+
+if (!skB64) {
+  throw new Error('ALGORAND_SECRET_KEY_BASE64 is not set in environment variables.');
+}
+
+// Decode Base64 secret key to Uint8Array (trim/remove whitespace just in case)
+const cleaned = skB64.trim().replace(/\s+/g, '');
+const sk = Uint8Array.from(atob(cleaned), (c) => c.charCodeAt(0));
+
+// Algorand secret keys should be 64 bytes (ed25519 secret key)
+if (sk.length !== 64) {
+  throw new Error(`Invalid Algorand secret key length: ${sk.length}. Expected 64 bytes.`);
+}
+
+const account = algosdk.secretKeyToAccount(sk);
+
+const url = new URL(rpcUrl);
+const baseServer = `${url.protocol}//${url.hostname}`;
+const port = url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80);
+
+// Algonode usually needs no API key. If you use a provider that requires one,
+// set ALGORAND_API_KEY and we pass it as a header.
+const apiKey = Deno.env.get('ALGORAND_API_KEY');
+const token = apiKey ? { 'X-API-Key': apiKey } : '';
+
+const algodClient = new algosdk.Algodv2(token as any, baseServer, port);
+
+  const suggestedParams = await algodClient.getTransactionParams().do();
+  const noteData = {
+    type: 'chainspeak_chat_session',
+    cid,
+    username,
+    sessionId,
+    timestamp: new Date().toISOString(),
+    version: '2.0',
+    platform: 'chainspeak',
+  };
+
+  const note = new TextEncoder().encode(JSON.stringify(noteData));
+  if (note.length > 1024) {
+    throw new Error('Note data too large for Algorand transaction (max 1024 bytes)');
+  }
+
+  const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+    from: account.addr,
+    to: account.addr, // Self-transaction
+    amount: 0,
+    note: note,
+    suggestedParams: suggestedParams,
+  });
+
+  const signedTxn = txn.signTxn(account.sk);
+  const { txId } = await algodClient.sendRawTransaction(signedTxn).do();
+  await algosdk.waitForConfirmation(algodClient, txId, 10);
+
+  console.log('✅ Successfully stored on Algorand testnet:', txId);
+  return txId;
+}
+
+// --- Main Server Handler ---
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
-  try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    
-    if (!supabaseUrl || !supabaseServiceKey) {
-      throw new Error('Supabase configuration missing');
-    }
-    
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  if (req.method === 'GET') {
+    return new Response(JSON.stringify({ ok: true, fn: 'save-conversations-to-blockchain' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }  
 
-    // --- CHANGED: Also get encryption_key from request body ---
+  const isDebug = Deno.env.get('DEBUG') === 'true';
+  let stage = 'initialization';
+
+  try {
     const { sessionId, username, conversationExchanges, encryption_key } = await req.json();
-    if (!sessionId || !username || !conversationExchanges || conversationExchanges.length === 0) {
-      return new Response(JSON.stringify({
-        error: 'Missing required fields: sessionId, username, and conversationExchanges'
-      }), {
+    if (!sessionId || !username || !conversationExchanges || !Array.isArray(conversationExchanges) || conversationExchanges.length === 0) {
+      return new Response(JSON.stringify({ error: 'Missing or invalid required fields: sessionId, username, conversationExchanges' }), {
         status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
-    console.log('🔐 Processing session save request:', {
-      sessionId,
-      username,
-      exchangeCount: conversationExchanges.length
-    });
+
     const conversationData = {
       username,
       sessionId,
       exchanges: conversationExchanges,
       createdAt: new Date().toISOString(),
-      totalExchanges: conversationExchanges.length
+      totalExchanges: conversationExchanges.length,
     };
-    // --- CHANGED: Pass encryption_key to encryption function ---
-    console.log('🔒 Encrypting conversation data...');
+
+    // 1. Encrypt Data
+    stage = 'encryption';
+    console.log(`🔒 Encrypting conversation data for session: ${sessionId}`);
     const encryptedData = await encryptConversationData(conversationData, encryption_key);
-    console.log('✅ Conversation data encrypted successfully');
-    console.log('📤 Uploading to Pinata IPFS...');
+    console.log('✅ Encryption successful.');
+
+    // 2. Upload to Pinata
+    stage = 'pinata_upload';
     const filename = `chainspeak-session-${sessionId}-${Date.now()}.json`;
-    const cid = await uploadToPinata(encryptedData, filename, supabase);
-    console.log('✅ Successfully uploaded to Pinata IPFS:', cid);
-    console.log('⛓️ Storing CID on Algorand blockchain...');
-    const txId = await storeOnAlgorand(cid, username, sessionId, supabase);
-    console.log('✅ Successfully stored on Algorand blockchain:', txId);
+    const cid = await uploadToPinata(encryptedData, filename);
+
+    // 3. Anchor on Algorand
+    stage = 'algorand_storage';
+    const txId = await storeOnAlgorand(cid, username, sessionId);
+
+    // 4. Update Supabase Database
+    stage = 'database_update';
     console.log('💾 Updating Supabase records...');
-    // --- CHANGED: Save encryption_key in chat_logs table ---
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    if (!supabaseUrl || !supabaseServiceKey) {
+      throw new Error('Supabase credentials for database update not found.');
+    }
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // TODO: For enhanced security, avoid storing the raw encryption key.
+    // A better approach would be to derive a key ID or use a Key Management System (KMS).
+    // For this iteration, we store the key as provided, but this is not recommended for production.
     const { error: dbError } = await supabase.from('chat_logs').update({
       cid: cid,
       algorand_tx_id: txId,
-      encryption_key: encryption_key
+      encryption_key: encryption_key, // Storing key for retrieval; see TODO above.
     }).eq('session_id', sessionId).eq('username', username);
-    if (dbError) {
-      console.error('Failed to update Supabase records:', dbError);
-    } else {
-      console.log('✅ Successfully updated Supabase records');
-    }
-    console.log('🎉 Session successfully saved to blockchain via Pinata!', {
-      sessionId,
-      cid,
-      txId,
-      totalExchanges: conversationData.totalExchanges
-    });
+
+    if (dbError) throw dbError;
+    console.log('✅ Successfully updated Supabase records.');
+
     return new Response(JSON.stringify({
       success: true,
-      cid: cid,
-      txId: txId,
-      sessionId: sessionId,
-      totalExchanges: conversationData.totalExchanges
+      cid,
+      txId,
+      sessionId,
+      totalExchanges: conversationData.totalExchanges,
     }), {
       status: 200,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
+
   } catch (error) {
-    console.error('❌ Edge function error:', error);
-    return new Response(JSON.stringify({
-      error: 'Failed to save conversation session to blockchain',
-      details: error.message
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    console.error(`❌ Error during stage: ${stage}`, error);
+    const errorBody = isDebug
+      ? { error: true, stage, details: error.message }
+      : { error: 'Failed to save conversation session to blockchain' };
+    
+    return new Response(JSON.stringify(errorBody), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 });
