@@ -156,7 +156,7 @@ serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
   if (req.method === 'GET') {
-    return new Response(JSON.stringify({ ok: true, fn: 'save-conversations-to-blockchain' }), {
+    return new Response(JSON.stringify({ ok: true, fn: 'save-conversation-to-blockchain' }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
@@ -207,17 +207,29 @@ serve(async (req) => {
     }
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // TODO: For enhanced security, avoid storing the raw encryption key.
-    // A better approach would be to derive a key ID or use a Key Management System (KMS).
-    // For this iteration, we store the key as provided, but this is not recommended for production.
-    const { error: dbError } = await supabase.from('chat_logs').update({
+    // Pre-update check: Log how many rows exist for this session_id
+    const { data: rows } = await supabase.from('chat_logs').select('id').eq('session_id', sessionId);
+    console.log('Rows found for session_id before update:', rows?.length);
+
+    const { data: updatedRows, error: dbError } = await supabase.from('chat_logs').update({
       cid: cid,
       algorand_tx_id: txId,
-      encryption_key: encryption_key, // Storing key for retrieval; see TODO above.
-    }).eq('session_id', sessionId).eq('username', username);
+      encryption_key: encryption_key, // Storing key for retrieval; not recommended for production.
+    })
+    .eq('session_id', sessionId)
+    .select();
 
-    if (dbError) throw dbError;
-    console.log('✅ Successfully updated Supabase records.');
+    if (dbError) {
+        console.error('Supabase update error:', dbError);
+        throw new Error(`Database update failed: ${dbError.message}`);
+    }
+
+    if (!updatedRows || updatedRows.length === 0) {
+        console.error('No matching rows found in chat_logs for update.', { sessionId });
+        throw new Error(`No chat_logs entries found for session_id '${sessionId}'. CID/TX ID could not be saved.`);
+    }
+
+    console.log(`✅ Successfully updated ${updatedRows.length} Supabase records.`);
 
     return new Response(JSON.stringify({
       success: true,
